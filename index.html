@@ -1,0 +1,281 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Suntas Checker | Admin</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0b1020;color:#f1f5ff;font:15px Arial,sans-serif}
+main{max-width:1100px;margin:35px auto;padding:0 20px}
+h1{margin-bottom:5px}h2{font-size:19px}
+p,small{color:#9daac3}
+.card{background:#161e33;border:1px solid #2c3954;border-radius:12px;padding:22px;margin:18px 0}
+input,select{width:100%;padding:12px;margin:8px 0 16px;background:#0d1426;color:white;border:1px solid #35415c;border-radius:8px}
+button{padding:11px 17px;background:#819dff;color:#071126;border:0;border-radius:8px;font-weight:bold;cursor:pointer;margin:4px}
+button:hover{opacity:.85}
+button:disabled{opacity:.5}
+.danger{background:#e96e78}
+.hidden{display:none}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:15px}
+.stat{font-size:32px;font-weight:bold}
+.tablewrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:650px}
+td,th{padding:12px;text-align:left;border-bottom:1px solid #303d58;font-size:13px}
+th{color:#9daac3}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0d1426;padding:15px;border-radius:8px;max-height:260px;overflow:auto}
+#message{color:#ffc2c2;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<main>
+<h1>Suntas Checker</h1>
+<p>Licence Administration Dashboard</p>
+
+<section id="loginPanel" class="card">
+<h2>Admin Login</h2>
+<label>Email</label>
+<input id="email" type="email" autocomplete="username">
+<label>Password</label>
+<input id="password" type="password" autocomplete="current-password">
+<button onclick="login()">Login</button>
+</section>
+
+<section id="dashboard" class="hidden">
+<button onclick="logout()">Logout</button>
+
+<div class="grid">
+<div class="card"><small>Total Licences</small><div id="total" class="stat">0</div></div>
+<div class="card"><small>Activated</small><div id="activated" class="stat">0</div></div>
+<div class="card"><small>Revoked</small><div id="revoked" class="stat">0</div></div>
+</div>
+
+<div class="card">
+<h2>Generate Licence Keys</h2>
+<label>Duration</label>
+<select id="duration">
+<option value="24_hours">24 Hours</option>
+<option value="7_days">7 Days</option>
+<option value="30_days">30 Days</option>
+<option value="lifetime">Lifetime</option>
+</select>
+<label>Quantity (maximum 50)</label>
+<input id="quantity" type="number" min="1" max="50" value="50">
+<button id="generateButton" onclick="generate()">Generate Keys</button>
+<div id="generatedPanel" class="hidden">
+<p>Save these keys now. They cannot be retrieved in full later.</p>
+<pre id="generatedKeys"></pre>
+<button onclick="downloadKeys()">Download Keys</button>
+</div>
+</div>
+
+<div class="card">
+<h2>Licences</h2>
+<button onclick="refresh()">Refresh</button>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Key Ending</th><th>Duration</th><th>Activated</th><th>Expires</th><th>Status</th><th>Action</th></tr></thead>
+<tbody id="licences"></tbody>
+</table>
+</div>
+</div>
+
+<div class="card">
+<h2>Activation Logs</h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Time</th><th>Key Ending</th><th>Duration</th><th>Event</th></tr></thead>
+<tbody id="logs"></tbody>
+</table>
+</div>
+</div>
+</section>
+<p id="message"></p>
+</main>
+
+<script>
+// REPLACE THESE TWO VALUES WITH YOUR OWN
+const SUPABASE_URL = "https://unoamckjqcmkbnokqnzh.supabase.co/rest/v1/
+";
+const SUPABASE_KEY = "sb_publishable_0OVdWB_qHB5MZrx3jIvhdg_RhHS_vYb";
+
+const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const $ = id => document.getElementById(id);
+let savedKeys = [];
+
+function notice(text) {
+  $("message").textContent = text;
+}
+
+async function request(action, extra = {}) {
+  const { data, error } = await client.functions.invoke(
+    "suntas-licenses",
+    { body: { action, ...extra } }
+  );
+
+  if (error) {
+    let message = error.message;
+    try {
+      const response = await error.context.json();
+      message = response.error || message;
+    } catch {}
+    throw new Error(message);
+  }
+
+  if (data?.error) throw new Error(data.error);
+  return data;
+}
+
+async function login() {
+  notice("");
+  const { error } = await client.auth.signInWithPassword({
+    email: $("email").value.trim(),
+    password: $("password").value
+  });
+
+  if (error) return notice(error.message);
+  await showDashboard();
+}
+
+async function logout() {
+  await client.auth.signOut();
+  $("dashboard").classList.add("hidden");
+  $("loginPanel").classList.remove("hidden");
+  notice("");
+}
+
+async function showDashboard() {
+  $("loginPanel").classList.add("hidden");
+  $("dashboard").classList.remove("hidden");
+  await refresh();
+}
+
+function formatDate(value) {
+  return value ? new Date(value).toLocaleString() : "—";
+}
+
+async function refresh() {
+  try {
+    const data = await request("dashboard");
+    const licenses = data.licenses || [];
+    const logs = data.logs || [];
+
+    $("total").textContent = licenses.length;
+    $("activated").textContent = licenses.filter(x =>
+      x.activated_at && !x.revoked &&
+      (!x.expires_at || new Date(x.expires_at) > new Date())
+    ).length;
+    $("revoked").textContent = licenses.filter(x => x.revoked).length;
+
+    $("licences").replaceChildren();
+
+    for (const license of licenses) {
+      const tr = document.createElement("tr");
+      const status = license.revoked ? "Revoked"
+        : !license.activated_at ? "Unused"
+        : license.expires_at && new Date(license.expires_at) <= new Date()
+        ? "Expired" : "Active";
+
+      const values = [
+        "••••" + license.key_last4,
+        license.duration_type,
+        formatDate(license.activated_at),
+        formatDate(license.expires_at),
+        status
+      ];
+
+      for (const value of values) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        tr.appendChild(td);
+      }
+
+      const actionCell = document.createElement("td");
+
+      if (!license.revoked) {
+        const button = document.createElement("button");
+        button.textContent = "Revoke";
+        button.className = "danger";
+        button.onclick = async () => {
+          if (!confirm("Revoke this licence?")) return;
+          try {
+            await request("revoke", { id: license.id });
+            await refresh();
+          } catch (e) {
+            notice(e.message);
+          }
+        };
+        actionCell.appendChild(button);
+      }
+
+      tr.appendChild(actionCell);
+      $("licences").appendChild(tr);
+    }
+
+    $("logs").replaceChildren();
+
+    for (const log of logs) {
+      const tr = document.createElement("tr");
+      const license = Array.isArray(log.licenses)
+        ? log.licenses[0] : log.licenses;
+
+      for (const value of [
+        formatDate(log.activated_at),
+        license?.key_last4 || "—",
+        license?.duration_type || "—",
+        log.event
+      ]) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        tr.appendChild(td);
+      }
+
+      $("logs").appendChild(tr);
+    }
+
+    notice("");
+  } catch (e) {
+    notice(e.message);
+  }
+}
+
+async function generate() {
+  const button = $("generateButton");
+  button.disabled = true;
+
+  try {
+    const data = await request("generate", {
+      duration: $("duration").value,
+      count: Number($("quantity").value)
+    });
+
+    savedKeys = data.keys || [];
+    $("generatedKeys").textContent = savedKeys.join("\n");
+    $("generatedPanel").classList.remove("hidden");
+    notice("Generated " + savedKeys.length + " keys. Download them now.");
+    await refresh();
+  } catch (e) {
+    notice(e.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function downloadKeys() {
+  const blob = new Blob([savedKeys.join("\n")], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "suntas-licence-keys.txt";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+client.auth.getSession().then(({ data }) => {
+  if (data.session) showDashboard();
+});
+</script>
+</body>
+</html>
